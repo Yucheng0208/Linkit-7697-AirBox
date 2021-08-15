@@ -5,12 +5,18 @@
 #include <WiFiUdp.h>
 #include <ctime>
 #include <LWiFi.h>
+#include "LTimer.h"
+#include "LWatchDog.h"
+
+#define TIMER0_INTERVAL (30e3) // timer0觸發時間，每觸發一次reboot_counter+1
 
 char _lwifi_ssid[] = ""; //填入Wi-Fi名稱
 char _lwifi_pass[] = ""; //填入Wi-Fi密碼
 
 SoftwareSerial myMerial(3, 2);
 U8G2_SSD1306_128X64_NONAME_F_SW_I2C u8g2(U8G2_R0, /* clock=*/ SCL, /* data=*/ SDA, /* reset=*/ U8X8_PIN_NONE);
+LTimer timer0(LTIMER_0);      //timer0 進行初始化
+
 
 long pmat10 = 0;
 long pmat25 = 0;
@@ -18,6 +24,8 @@ long pmat100 = 0;
 long Temp = 0;
 long Humid = 0;
 char buf[50];
+short reboot_counter = 0;     //counter，因為timer0 0.5秒觸發一次counter++，counter因此當counter>=*interval，則reboot
+short reboot_interval = 1;    //多久(min)重啟
 
 //----------------------------------
 void set_rtc_from_time_string(const String& time_str) {
@@ -132,13 +140,18 @@ void setup() {
   u8g2.clearBuffer();
   u8g2.setFont(u8g2_font_ncenB08_tr);
   u8g2.drawStr(0,10,"Wait...");
+  //u8g2.drawStr(0,25,(String(get_time_from_RTC())).c_str());
   u8g2.sendBuffer();
   
   WiFi.begin(_lwifi_ssid, _lwifi_pass);
   delay(3000); 
+  LWatchDog.begin(60); //啟動看門狗，單位：秒
+  timer0.begin();
+  timer0.start(TIMER0_INTERVAL, LTIMER_ONESHOT_MODE, ISR_TIMER0, NULL);
 }
 
 void loop() {
+  LWatchDog.feed();  //呼叫看門狗函式庫，清除
   retrievepm25();
   
   u8g2.clearBuffer();
@@ -191,4 +204,20 @@ void retrievepm25(){
     count++;
   }
   while(myMerial.available()) myMerial.read();
+}
+
+/*TIMER0中斷副程式*/
+void ISR_TIMER0(void *usr_data) {
+  /* 每0.5秒會中斷觸發這個副程式一次，使得reboot_counter++。
+   * 若reboot_counter >= (reboot_interval*2)，
+   * 則reboot設為TRUE，該reboot旗標告訴loop不可將餵食看門狗(WDT)
+   * 並設定看門狗1秒後重啟板子(reboot)
+  */
+  reboot_counter++;
+  if ( (reboot_counter >= (reboot_interval*2))) {
+    LWatchDog.end();
+    LWatchDog.begin(1);
+  } else {
+    timer0.start(TIMER0_INTERVAL, LTIMER_ONESHOT_MODE, ISR_TIMER0, NULL);
+  }
 }
